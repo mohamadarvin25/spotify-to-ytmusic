@@ -12,13 +12,19 @@ Masalah: Spotify dan YouTube Music itu **dua sistem yang gak ngomong satu sama l
 
 Pipeline-nya:
 
+```mermaid
+flowchart LR
+    A[Spotify Playlist] -->|1\. fetch via pathfinder| B[playlist_tracks.json<br/>judul + artis + added_at<br/>sorted asc]
+    B -->|2\. search per lagu| C[transfer_log.txt<br/>videoId per lagu]
+    C -->|3\. add ke playlist| D[YouTube Music Playlist]
+
+    style A fill:#1DB954,color:#fff
+    style D fill:#FF0000,color:#fff
+    style B fill:#444,color:#fff
+    style C fill:#444,color:#fff
 ```
-[Spotify Playlist]
-       ↓ (1. fetch)
-[playlist_tracks.json]   ← list judul+artis+album+added_at, sorted by added_at asc
-       ↓ (2. search + 3. add)
-[YouTube Music Playlist]
-```
+
+Tiga step yang dipisah jadi file output → kalo step 3 fail, gak perlu re-run step 1 & 2. Pattern klasik **ETL (Extract → Transform → Load)**.
 
 ---
 
@@ -35,6 +41,27 @@ Pipeline-nya:
 - Con: gak resmi. Endpoint internal, format bisa berubah sewaktu-waktu.
 
 ### Cara mode scraping kerja
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant B as Browser (open.spotify.com)
+    participant S as spotify_scrape.py
+    participant API as api-partner.spotify.com<br/>(pathfinder)
+
+    U->>B: Login + buka playlist
+    B->>API: fetchPlaylist (GraphQL persisted query)
+    API-->>B: tracks data
+    Note over U,B: Buka DevTools, copy<br/>authorization, client-token, sha256Hash
+
+    U->>S: jalankan script + paste creds
+    loop pagination (offset 0, 100, 200, ...)
+        S->>API: POST fetchPlaylist + Bearer token + client-token
+        API-->>S: 100 tracks per request
+    end
+    S->>S: sort by added_at asc
+    S->>S: write playlist_tracks.json
+```
 
 Web player Spotify pake **GraphQL persisted queries**. Konsepnya:
 
@@ -121,6 +148,28 @@ Cookies YT Music yang penting:
 
 ### Algoritma matching
 
+```mermaid
+flowchart TD
+    A[Lagu Spotify:<br/>judul + artis + durasi] --> B["YT Music search<br/>(filter: songs)"]
+    B --> C{ada hasil?}
+    C -->|tidak| D["fallback search<br/>(filter: videos)"]
+    C -->|ya| E[ambil 5 hasil teratas]
+    D --> E
+    E --> F[skor tiap hasil]
+    F --> G{title match?}
+    G -->|ya| H[+2.0]
+    F --> I{artist match?}
+    I -->|ya| J[+2.0]
+    F --> K{durasi diff?}
+    K -->|≤3 detik| L[+1.5]
+    K -->|≤8 detik| M[+0.5]
+    H --> N[pilih skor tertinggi]
+    J --> N
+    L --> N
+    M --> N
+    N --> O[videoId]
+```
+
 Per lagu Spotify, kita query `"<judul> <artis utama>"` ke YT Music, dapet 5 hasil teratas, lalu skor:
 
 ```python
@@ -152,6 +201,32 @@ Songs lebih akurat (metadata lebih bersih), tapi kadang lagu obscure cuma ada se
 ---
 
 ## 4. Step 3 — Add ke playlist
+
+### Batch vs Strict-order
+
+```mermaid
+flowchart TB
+    subgraph Batch["Batch mode (cepet)"]
+        direction LR
+        B1["[v1, v2, ..., v50]"] --> B2[1 request]
+        B2 --> B3["urutan dalam batch<br/>bisa keacak"]
+    end
+
+    subgraph Strict["Strict-order mode (lambat)"]
+        direction LR
+        S1[v1] --> S2[request]
+        S2 --> S3[wait 1.2s]
+        S3 --> S4[v2]
+        S4 --> S5[request]
+        S5 --> S6[wait 1.2s]
+        S6 --> S7[...]
+    end
+
+    Compare[543 tracks] --> Batch
+    Compare --> Strict
+    Batch --> R1[~30 detik<br/>urutan ~80% accurate]
+    Strict --> R2[~12 menit<br/>urutan 100% accurate<br/>+ resumable]
+```
 
 ### Batch mode (`transfer_to_ytmusic.py`, `add_only.py`)
 

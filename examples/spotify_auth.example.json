@@ -1,0 +1,4 @@
+{
+  "authorization": "Bearer PASTE_BEARER_TOKEN_FROM_DEVTOOLS_HERE",
+  "client_token": "PASTE_CLIENT_TOKEN_FROM_DEVTOOLS_HERE"
+}

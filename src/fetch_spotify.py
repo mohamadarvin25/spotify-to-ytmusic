@@ -1,47 +1,45 @@
-"""
-Fetch Spotify playlist tracks via the public web-player API (pathfinder).
-No OAuth / Spotify Developer App required.
+"""Fetch a Spotify playlist via the public web-player API (pathfinder).
 
-Returns tracks sorted by added_at ascending (oldest first).
+No OAuth or Spotify Developer App needed. Reads auth tokens from
+`spotify_auth.json` (see examples/spotify_auth.example.json).
+
+Output: playlist_tracks.json — sorted by added_at ascending (oldest first).
+
+Usage:
+    python -m src.fetch_spotify <playlist_url_or_id>
 """
 
 import json
-import re
 import sys
 import time
-from pathlib import Path
-from urllib.parse import quote
 
 import requests
 
+from .common import (
+    PLAYLIST_TRACKS_FILE,
+    SPOTIFY_AUTH_FILE,
+    extract_playlist_id,
+    setup_utf8_stdout,
+)
 
-HERE = Path(__file__).parent
-SP_AUTH_FILE = HERE / "spotify_auth.json"
 
 PATHFINDER_URL = "https://api-partner.spotify.com/pathfinder/v2/query"
 
-# Persisted query hash for "fetchPlaylist". This may rotate over time;
-# if Spotify returns a "PersistedQueryNotFound" error, update this.
+# Persisted query hash for the "fetchPlaylist" GraphQL operation. Spotify
+# rotates these when they ship a new web bundle. If you get
+# "PersistedQueryNotFound", re-grab this from DevTools (see README).
 FETCH_PLAYLIST_HASH = "a65e12194ed5fc443a1cdebed5fabe33ca5b07b987185d63c72483867ad13cb4"
 
 
-def extract_playlist_id(url_or_id: str) -> str:
-    m = re.search(r"playlist[/:]([a-zA-Z0-9]+)", url_or_id)
-    return m.group(1) if m else url_or_id.strip()
-
-
-def load_auth():
-    if not SP_AUTH_FILE.exists():
-        print(f"ERROR: {SP_AUTH_FILE} not found.")
+def load_auth() -> dict:
+    if not SPOTIFY_AUTH_FILE.exists():
+        print(f"ERROR: {SPOTIFY_AUTH_FILE.name} not found. See README for how to grab tokens.")
         sys.exit(1)
-    with open(SP_AUTH_FILE, "r", encoding="utf-8") as f:
+    with open(SPOTIFY_AUTH_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
-def fetch_playlist(playlist_id: str, auth: dict, limit: int = 100):
-    """Fetch all tracks of a Spotify playlist via the pathfinder API.
-    Yields a list of dicts: {name, artists, album, added_at, duration_ms}.
-    """
+def fetch_playlist(playlist_id: str, auth: dict, page_size: int = 100) -> list[dict]:
     headers = {
         "authorization": auth["authorization"],
         "client-token": auth["client_token"],
@@ -55,16 +53,16 @@ def fetch_playlist(playlist_id: str, auth: dict, limit: int = 100):
         "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     }
 
-    all_tracks = []
+    all_tracks: list[dict] = []
     offset = 0
-    total = None
+    total: int | None = None
 
     while True:
         body = {
             "variables": {
                 "uri": f"spotify:playlist:{playlist_id}",
                 "offset": offset,
-                "limit": limit,
+                "limit": page_size,
                 "enableWatchFeedEntrypoint": True,
                 "includeEpisodeContentRatingsV2": False,
             },
@@ -78,13 +76,11 @@ def fetch_playlist(playlist_id: str, auth: dict, limit: int = 100):
         }
 
         r = requests.post(PATHFINDER_URL, headers=headers, json=body, timeout=30)
-
         if r.status_code != 200:
             print(f"HTTP {r.status_code}: {r.text[:500]}")
             r.raise_for_status()
 
         data = r.json()
-
         if "errors" in data:
             print("API error:", json.dumps(data["errors"], indent=2)[:1000])
             sys.exit(1)
@@ -103,17 +99,15 @@ def fetch_playlist(playlist_id: str, auth: dict, limit: int = 100):
             track = item.get("itemV2", {}).get("data") or item.get("item", {}).get("data") or {}
             if not track:
                 continue
-            name = track.get("name", "")
             duration_ms = (track.get("trackDuration") or {}).get("totalMilliseconds", 0)
             if not duration_ms:
                 duration_ms = track.get("duration", {}).get("totalMilliseconds", 0)
             artists_field = track.get("artists", {}).get("items", [])
             artists = [a.get("profile", {}).get("name", "") for a in artists_field if a]
-            album_name = (track.get("albumOfTrack") or {}).get("name", "")
             all_tracks.append({
-                "name": name,
+                "name": track.get("name", ""),
                 "artists": [a for a in artists if a],
-                "album": album_name,
+                "album": (track.get("albumOfTrack") or {}).get("name", ""),
                 "added_at": added_at,
                 "duration_ms": duration_ms,
             })
@@ -131,21 +125,22 @@ def fetch_playlist(playlist_id: str, auth: dict, limit: int = 100):
 
 
 def main():
+    setup_utf8_stdout()
+
     if len(sys.argv) < 2:
-        print("Usage: python spotify_scrape.py <playlist_url_or_id> [output.json]")
+        print(__doc__)
         sys.exit(1)
 
     playlist_id = extract_playlist_id(sys.argv[1])
-    output = sys.argv[2] if len(sys.argv) > 2 else "playlist_tracks.json"
+    print(f"Fetching playlist {playlist_id}...")
 
     auth = load_auth()
-    print(f"Fetching playlist {playlist_id}...")
     tracks = fetch_playlist(playlist_id, auth)
     print(f"\nTotal tracks fetched: {len(tracks)}")
 
-    with open(output, "w", encoding="utf-8") as f:
+    with open(PLAYLIST_TRACKS_FILE, "w", encoding="utf-8") as f:
         json.dump(tracks, f, ensure_ascii=False, indent=2)
-    print(f"Saved to {output}")
+    print(f"Saved to {PLAYLIST_TRACKS_FILE.name}")
 
 
 if __name__ == "__main__":

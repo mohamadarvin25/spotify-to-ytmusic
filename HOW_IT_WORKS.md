@@ -316,15 +316,20 @@ Long-term solution: tools kayak [librespot](https://github.com/librespot-org/lib
 
 | File | Fungsi |
 |------|--------|
-| `transfer.py` | All-in-one mode resmi (butuh Spotify Premium app owner). |
-| `spotify_scrape.py` | Mode scraping — fetch playlist tanpa Spotify API resmi. |
-| `transfer_to_ytmusic.py` | Step 2+3 — search & add (batch). Read `playlist_tracks.json`. |
-| `add_only.py` | Re-run step 3 dari `transfer_log.txt` (batch, kalo step 3 sebelumnya gagal). |
-| `add_strict_order.py` | Re-run step 3 (strict order, resumable). |
+| `src/common.py` | Shared utilities — paths, `extract_playlist_id`, `search_ytmusic`, UTF-8 setup. |
+| `src/fetch_spotify.py` | Step 1 — fetch playlist via pathfinder, save ke `playlist_tracks.json`. |
+| `src/transfer.py` | Step 2+3 — search & add (batch mode). Main entry point. |
+| `src/add_batch.py` | Re-run step 3 dari `transfer_log.txt` (batch, kalo step 3 fail di tengah). |
+| `src/add_ordered.py` | Re-run step 3 (strict order, resumable via `.add_progress`). |
+| `src/transfer_official.py` | All-in-one mode resmi (deprecated, butuh Spotify Premium). |
+| `examples/*.example.json` | Templates — copy ke root, isi credentials sendiri. |
 | `requirements.txt` | Dependencies: `spotipy`, `ytmusicapi`. |
-| `config.example.json` | Template untuk Spotify OAuth credentials (mode resmi). |
-| `browser.example.json` | Template untuk YT Music auth (cookies + headers). |
 | `.gitignore` | Block file sensitif & generated. |
+
+Naming convention: semua entry script pakai pattern `<verb>_<target>.py`:
+- `fetch_spotify` — ambil dari Spotify
+- `transfer` — full pipeline (search + add)
+- `add_batch` / `add_ordered` — variant dari step add doang
 
 ---
 

@@ -1,0 +1,13 @@
+{
+    "authorization": "SAPISIDHASH",
+    "accept": "*/*",
+    "accept-encoding": "gzip, deflate",
+    "accept-language": "en-US,en;q=0.5",
+    "content-encoding": "gzip",
+    "content-type": "application/json",
+    "cookie": "PASTE_COOKIE_STRING_HERE_e.g._SAPISID=xxx; SID=xxx; __Secure-3PSID=xxx; ...",
+    "origin": "https://music.youtube.com",
+    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Gecko/20100101 Firefox/120.0",
+    "x-goog-authuser": "0",
+    "x-origin": "https://music.youtube.com"
+}

@@ -1,0 +1,25 @@
+# Secrets and local auth - NEVER commit these
+config.json
+browser.json
+spotify_auth.json
+.spotify_cache
+
+# Generated/local data
+playlist_tracks.json
+transfer_log.txt
+not_found.txt
+.add_progress
+transfer_output.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini

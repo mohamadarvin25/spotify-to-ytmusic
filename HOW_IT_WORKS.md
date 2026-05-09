@@ -10,21 +10,43 @@ Tujuan: ambil playlist Spotify → bikin playlist baru di YouTube Music → isi 
 
 Masalah: Spotify dan YouTube Music itu **dua sistem yang gak ngomong satu sama lain**. Gak ada API resmi yang nge-link mereka. Jadi kita harus jadi "perantara": ambil data dari satu, cari padanannya di yang lain, lalu add manual.
 
-Pipeline-nya:
+Pipeline-nya (ETL — Extract, Transform, Load):
 
 ```mermaid
 flowchart LR
-    A[Spotify Playlist] -->|1\. fetch via pathfinder| B[playlist_tracks.json<br/>judul + artis + added_at<br/>sorted asc]
-    B -->|2\. search per lagu| C[transfer_log.txt<br/>videoId per lagu]
-    C -->|3\. add ke playlist| D[YouTube Music Playlist]
+    classDef spotify fill:#1DB954,stroke:#0d7a36,color:#fff,stroke-width:2px
+    classDef ytmusic fill:#FF0000,stroke:#990000,color:#fff,stroke-width:2px
+    classDef state fill:#2d2d2d,stroke:#888,color:#fff,stroke-width:1px,stroke-dasharray:5 5
+    classDef script fill:#4287f5,stroke:#1e3a8a,color:#fff,stroke-width:2px
 
-    style A fill:#1DB954,color:#fff
-    style D fill:#FF0000,color:#fff
-    style B fill:#444,color:#fff
-    style C fill:#444,color:#fff
+    SP("🎵 Spotify<br/>Playlist"):::spotify
+
+    subgraph EXTRACT["📥 EXTRACT"]
+        FS["fetch_spotify.py"]:::script
+        TR1[("📄 playlist_tracks.json<br/>━━━━━━━━━━<br/>name + artists<br/>+ added_at<br/>sorted ASC")]:::state
+    end
+
+    subgraph TRANSFORM["🔍 TRANSFORM"]
+        TF["transfer.py<br/>(search)"]:::script
+        TR2[("📄 transfer_log.txt<br/>━━━━━━━━━━<br/>videoId per track")]:::state
+    end
+
+    subgraph LOAD["📤 LOAD"]
+        TF2["transfer.py<br/>(add)"]:::script
+    end
+
+    YT("🎬 YouTube Music<br/>Playlist"):::ytmusic
+
+    SP -->|"GraphQL<br/>pathfinder API"| FS
+    FS --> TR1
+    TR1 --> TF
+    TF -->|"YT Music search"| TF
+    TF --> TR2
+    TR2 --> TF2
+    TF2 -->|"add_playlist_items"| YT
 ```
 
-Tiga step yang dipisah jadi file output → kalo step 3 fail, gak perlu re-run step 1 & 2. Pattern klasik **ETL (Extract → Transform → Load)**.
+**Kenapa dipisah jadi 3 file output?** Kalo step LOAD (add) fail di tengah, gak perlu re-run EXTRACT (fetch) & TRANSFORM (search). Tinggal jalanin `add_batch.py` atau `add_ordered.py` yang baca dari `transfer_log.txt`. Pattern ini disebut **idempotent stages** — tiap stage bisa dijalanin ulang independen.
 
 ---
 
@@ -44,23 +66,37 @@ Tiga step yang dipisah jadi file output → kalo step 3 fail, gak perlu re-run s
 
 ```mermaid
 sequenceDiagram
-    participant U as User
-    participant B as Browser (open.spotify.com)
-    participant S as spotify_scrape.py
-    participant API as api-partner.spotify.com<br/>(pathfinder)
+    autonumber
+    actor U as 👤 User
+    participant B as 🌐 Browser<br/>(open.spotify.com)
+    participant S as 🐍 fetch_spotify.py
+    participant API as 🟢 Spotify API<br/>(pathfinder)
+    participant FS as 💾 playlist_tracks.json
 
-    U->>B: Login + buka playlist
-    B->>API: fetchPlaylist (GraphQL persisted query)
-    API-->>B: tracks data
-    Note over U,B: Buka DevTools, copy<br/>authorization, client-token, sha256Hash
-
-    U->>S: jalankan script + paste creds
-    loop pagination (offset 0, 100, 200, ...)
-        S->>API: POST fetchPlaylist + Bearer token + client-token
-        API-->>S: 100 tracks per request
+    rect rgb(220, 245, 220)
+        Note over U,API: PHASE 1 — Manual auth grab
+        U->>B: Login + open playlist
+        B->>API: fetchPlaylist GraphQL
+        API-->>B: tracks (rendered as web page)
+        U->>B: F12 → Network tab → filter "pathfinder"
+        B-->>U: Show: authorization, client-token, sha256Hash
+        U->>S: spotify_auth.json + script args
     end
-    S->>S: sort by added_at asc
-    S->>S: write playlist_tracks.json
+
+    rect rgb(220, 230, 245)
+        Note over S,API: PHASE 2 — Automated pagination
+        loop offset = 0, 100, 200, ... until total
+            S->>API: POST fetchPlaylist<br/>{offset, limit:100, hash}
+            API-->>S: 100 tracks + total count
+            Note right of S: Sleep 0.3s<br/>(rate-limit safety)
+        end
+    end
+
+    rect rgb(245, 235, 220)
+        Note over S,FS: PHASE 3 — Sort & persist
+        S->>S: sort tracks by added_at ASC
+        S->>FS: write JSON
+    end
 ```
 
 Web player Spotify pake **GraphQL persisted queries**. Konsepnya:
@@ -149,26 +185,50 @@ Cookies YT Music yang penting:
 ### Algoritma matching
 
 ```mermaid
-flowchart TD
-    A[Lagu Spotify:<br/>judul + artis + durasi] --> B["YT Music search<br/>(filter: songs)"]
-    B --> C{ada hasil?}
-    C -->|tidak| D["fallback search<br/>(filter: videos)"]
-    C -->|ya| E[ambil 5 hasil teratas]
+flowchart TB
+    classDef input fill:#1DB954,stroke:#0d7a36,color:#fff,stroke-width:2px
+    classDef search fill:#FF0000,stroke:#990000,color:#fff,stroke-width:2px
+    classDef decision fill:#FFB000,stroke:#8B5A00,color:#000
+    classDef score fill:#4287f5,color:#fff,stroke:#1e3a8a
+    classDef output fill:#22c55e,stroke:#15803d,color:#fff,stroke-width:2px
+
+    A["🎵 Spotify Track<br/>━━━━━━━━━━<br/>name + primary_artist<br/>+ duration_ms"]:::input
+    A --> B["🔍 YT Music search<br/>filter='songs'<br/>limit=5"]:::search
+    B --> C{Got results?}:::decision
+    C -->|No| D["🔍 Fallback search<br/>filter='videos'"]:::search
+    C -->|Yes| E[Take top 5 candidates]
     D --> E
-    E --> F[skor tiap hasil]
-    F --> G{title match?}
-    G -->|ya| H[+2.0]
-    F --> I{artist match?}
-    I -->|ya| J[+2.0]
-    F --> K{durasi diff?}
-    K -->|≤3 detik| L[+1.5]
-    K -->|≤8 detik| M[+0.5]
-    H --> N[pilih skor tertinggi]
-    J --> N
-    L --> N
-    M --> N
-    N --> O[videoId]
+
+    E --> SCORE["⚖️ Score each candidate"]
+
+    subgraph SCORING ["📊 Scoring (max 5.5 points)"]
+        direction LR
+        S1["📝 Title contains<br/>spotify_name?"]:::decision
+        S1 -->|YES| S1Y[["+2.0"]]:::score
+        S1 -->|NO| S1N[["+0.0"]]
+
+        S2["👤 Artist matches?"]:::decision
+        S2 -->|YES| S2Y[["+2.0"]]:::score
+        S2 -->|NO| S2N[["+0.0"]]
+
+        S3["⏱️ Duration diff"]:::decision
+        S3 -->|"≤3s"| S3A[["+1.5"]]:::score
+        S3 -->|"≤8s"| S3B[["+0.5"]]:::score
+        S3 -->|">8s"| S3C[["+0.0"]]
+    end
+
+    SCORE --> SCORING
+    SCORING --> N["🏆 Pick highest score"]
+    N --> O["✅ videoId"]:::output
 ```
+
+Contoh skoring untuk lagu `"Bohemian Rhapsody" - Queen, 354s`:
+
+| Candidate | title match | artist match | duration | total |
+|-----------|:-:|:-:|:-:|:-:|
+| `Bohemian Rhapsody - Queen (354s)` | ✅ +2.0 | ✅ +2.0 | ≤3s ✅ +1.5 | **5.5** 🏆 |
+| `Bohemian Rhapsody (Live) - Queen (412s)` | ✅ +2.0 | ✅ +2.0 | >8s ❌ +0 | 4.0 |
+| `Bohemian Rhapsody - Panic! At The Disco (327s)` | ✅ +2.0 | ❌ +0 | ≤8s ✅ +0.5 | 2.5 |
 
 Per lagu Spotify, kita query `"<judul> <artis utama>"` ke YT Music, dapet 5 hasil teratas, lalu skor:
 
@@ -202,31 +262,62 @@ Songs lebih akurat (metadata lebih bersih), tapi kadang lagu obscure cuma ada se
 
 ## 4. Step 3 — Add ke playlist
 
-### Batch vs Strict-order
+### Batch vs Strict-order — visual comparison
 
 ```mermaid
 flowchart TB
-    subgraph Batch["Batch mode (cepet)"]
-        direction LR
-        B1["[v1, v2, ..., v50]"] --> B2[1 request]
-        B2 --> B3["urutan dalam batch<br/>bisa keacak"]
+    classDef fast fill:#22c55e,stroke:#15803d,color:#fff,stroke-width:2px
+    classDef slow fill:#FFB000,stroke:#8B5A00,color:#000,stroke-width:2px
+    classDef result fill:#2d2d2d,color:#fff
+
+    INPUT["📦 543 tracks to add"]
+
+    subgraph BATCH ["⚡ BATCH (transfer.py / add_batch.py)"]
+        direction TB
+        B1["📡 POST [v1..v50]"]:::fast
+        B2["⏸️ sleep 1s"]
+        B3["📡 POST [v51..v100]"]:::fast
+        B4["⏸️ sleep 1s"]
+        B5["..."]
+        B6["📡 POST [v501..v543]"]:::fast
+        B1 --> B2 --> B3 --> B4 --> B5 --> B6
     end
 
-    subgraph Strict["Strict-order mode (lambat)"]
-        direction LR
-        S1[v1] --> S2[request]
-        S2 --> S3[wait 1.2s]
-        S3 --> S4[v2]
-        S4 --> S5[request]
-        S5 --> S6[wait 1.2s]
-        S6 --> S7[...]
+    subgraph ORDERED ["🎯 STRICT (add_ordered.py)"]
+        direction TB
+        O1["📡 POST [v1]"]:::slow
+        O2["⏸️ sleep 1.2s"]
+        O3["📡 POST [v2]"]:::slow
+        O4["⏸️ sleep 1.2s"]
+        O5["..."]
+        O6["📡 POST [v543]"]:::slow
+        O1 --> O2 --> O3 --> O4 --> O5 --> O6
     end
 
-    Compare[543 tracks] --> Batch
-    Compare --> Strict
-    Batch --> R1[~30 detik<br/>urutan ~80% accurate]
-    Strict --> R2[~12 menit<br/>urutan 100% accurate<br/>+ resumable]
+    INPUT --> BATCH
+    INPUT --> ORDERED
+
+    BATCH --> RB["⏱️ ~30 sec total<br/>📊 11 requests<br/>⚠️ order ~80% accurate<br/>(within batch can shuffle)"]:::result
+    ORDERED --> RO["⏱️ ~12 min total<br/>📊 543 requests<br/>✅ order 100% accurate<br/>♻️ resumable on failure"]:::result
 ```
+
+**Trade-off**:
+
+```
+    SPEED   ████████████████████░░░░  Batch
+            ████░░░░░░░░░░░░░░░░░░░░  Strict
+                                       =========================>
+
+  ACCURACY  ████████████████░░░░░░░░  Batch
+            ████████████████████████  Strict
+                                       =========================>
+
+   RESUME   ░░░░░░░░░░░░░░░░░░░░░░░░  Batch (re-run from start)
+            ████████████████████████  Strict (checkpoint per track)
+                                       =========================>
+```
+
+Default: pake `transfer.py` (batch). Switch ke `add_ordered.py` cuma kalo urutan benar-benar penting (misalnya playlist tematik dengan progression cerita).
 
 ### Batch mode (`transfer_to_ytmusic.py`, `add_only.py`)
 
@@ -283,6 +374,31 @@ Saat error (misal cookies expired), simpan posisi terakhir, exit. Saat re-run, b
 
 Pattern ini berguna untuk **task panjang yang bisa fail di tengah jalan**: scraping besar, batch processing, ETL pipeline. Selalu pisahin "sumber data" (yang gak berubah) dari "progress" (yang ditulis bertahap).
 
+State machine-nya:
+
+```mermaid
+stateDiagram-v2
+    [*] --> CheckProgress: python -m src.add_ordered
+    CheckProgress --> ResumeFromN: .add_progress exists
+    CheckProgress --> StartFromZero: no .add_progress
+    StartFromZero --> Adding: i = 0
+    ResumeFromN --> Adding: i = N
+
+    state Adding {
+        [*] --> Pending
+        Pending --> Success: yt.add_playlist_items OK
+        Pending --> Failed: 401 / network err
+        Success --> [*]: i += 1, sleep 1.2s
+        Failed --> [*]: write i to .add_progress, exit
+    }
+
+    Adding --> CheckpointEvery25: i % 25 == 0
+    CheckpointEvery25 --> Adding: write i to .add_progress
+    Adding --> Done: i == len(video_ids)
+    Done --> CleanupProgress: delete .add_progress
+    CleanupProgress --> [*]
+```
+
 ### UTF-8 di Windows
 
 Default Windows console pake `cp1252`, gak support karakter Jepang/Korea/dll. Pas script print judul lagu yang ada karakter non-Latin, dia error `UnicodeEncodeError`.
@@ -314,19 +430,86 @@ Long-term solution: tools kayak [librespot](https://github.com/librespot-org/lib
 
 ## 6. File-file di project ini
 
+### Module dependency graph
+
+```mermaid
+flowchart TB
+    classDef shared fill:#a855f7,stroke:#6b21a8,color:#fff,stroke-width:2px
+    classDef entry fill:#22c55e,stroke:#15803d,color:#fff,stroke-width:2px
+    classDef deprecated fill:#71717a,stroke:#3f3f46,color:#fff,stroke-width:1px,stroke-dasharray:5 5
+    classDef ext fill:#0ea5e9,stroke:#0369a1,color:#fff
+    classDef data fill:#facc15,stroke:#a16207,color:#000
+
+    subgraph SRC ["📁 src/"]
+        COMMON["🧰 common.py<br/>━━━━━━━<br/>extract_playlist_id<br/>search_ytmusic<br/>score_ytmusic_result<br/>setup_utf8_stdout<br/>file paths"]:::shared
+
+        FS["🐍 fetch_spotify.py"]:::entry
+        TR["🐍 transfer.py"]:::entry
+        AB["🐍 add_batch.py"]:::entry
+        AO["🐍 add_ordered.py"]:::entry
+        TO["🐍 transfer_official.py<br/>(deprecated)"]:::deprecated
+    end
+
+    subgraph EXT ["📦 External libs"]
+        REQ["requests"]:::ext
+        YTA["ytmusicapi"]:::ext
+        SPO["spotipy"]:::ext
+    end
+
+    subgraph DATA ["💾 Data files (gitignored)"]
+        SA["spotify_auth.json"]:::data
+        BJ["browser.json"]:::data
+        CFG["config.json"]:::data
+        PT["playlist_tracks.json"]:::data
+        TL["transfer_log.txt"]:::data
+        AP[".add_progress"]:::data
+    end
+
+    FS --> COMMON
+    TR --> COMMON
+    AB --> COMMON
+    AO --> COMMON
+    TO --> COMMON
+
+    FS --> REQ
+    FS --> SA
+    FS --> PT
+
+    TR --> YTA
+    TR --> BJ
+    TR --> PT
+    TR --> TL
+
+    AB --> YTA
+    AB --> BJ
+    AB --> TL
+
+    AO --> YTA
+    AO --> BJ
+    AO --> TL
+    AO --> AP
+
+    TO --> SPO
+    TO --> YTA
+    TO --> CFG
+    TO --> BJ
+```
+
+### Quick reference
+
 | File | Fungsi |
 |------|--------|
-| `src/common.py` | Shared utilities — paths, `extract_playlist_id`, `search_ytmusic`, UTF-8 setup. |
-| `src/fetch_spotify.py` | Step 1 — fetch playlist via pathfinder, save ke `playlist_tracks.json`. |
-| `src/transfer.py` | Step 2+3 — search & add (batch mode). Main entry point. |
-| `src/add_batch.py` | Re-run step 3 dari `transfer_log.txt` (batch, kalo step 3 fail di tengah). |
-| `src/add_ordered.py` | Re-run step 3 (strict order, resumable via `.add_progress`). |
-| `src/transfer_official.py` | All-in-one mode resmi (deprecated, butuh Spotify Premium). |
-| `examples/*.example.json` | Templates — copy ke root, isi credentials sendiri. |
-| `requirements.txt` | Dependencies: `spotipy`, `ytmusicapi`. |
-| `.gitignore` | Block file sensitif & generated. |
+| `src/common.py` 🧰 | Shared utilities — paths, `extract_playlist_id`, `search_ytmusic`, UTF-8 setup. |
+| `src/fetch_spotify.py` 📥 | Step 1 — fetch playlist via pathfinder, save ke `playlist_tracks.json`. |
+| `src/transfer.py` 🔁 | Step 2+3 — search & add (batch mode). Main entry point. |
+| `src/add_batch.py` ⚡ | Re-run step 3 dari `transfer_log.txt` (batch, kalo step 3 fail di tengah). |
+| `src/add_ordered.py` 🎯 | Re-run step 3 (strict order, resumable via `.add_progress`). |
+| `src/transfer_official.py` 🚫 | All-in-one mode resmi (deprecated, butuh Spotify Premium). |
+| `examples/*.example.json` 📋 | Templates — copy ke root, isi credentials sendiri. |
+| `requirements.txt` 📦 | Dependencies: `spotipy`, `ytmusicapi`. |
+| `.gitignore` 🔒 | Block file sensitif & generated. |
 
-Naming convention: semua entry script pakai pattern `<verb>_<target>.py`:
+**Naming convention**: semua entry script pakai pattern `<verb>_<target>.py`:
 - `fetch_spotify` — ambil dari Spotify
 - `transfer` — full pipeline (search + add)
 - `add_batch` / `add_ordered` — variant dari step add doang
